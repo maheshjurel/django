@@ -20,7 +20,7 @@ def cache_page(timeout, *, cache=None, key_prefix=None):
     into account on caching -- just like the middleware does.
     """
     return decorator_from_middleware_with_args(CacheMiddleware)(
-        cache_timeout=timeout, cache_alias=cache, key_prefix=key_prefix
+        page_timeout=timeout, cache_alias=cache, key_prefix=key_prefix,
     )
 
 
@@ -37,8 +37,7 @@ def cache_control(**kwargs):
 
 def never_cache(view_func):
     """
-    Decorator that adds headers to a response so that it will
-    never be cached.
+    Decorator that adds headers to a response so that it will never be cached.
     """
     @wraps(view_func)
     def _wrapped_view_func(request, *args, **kwargs):

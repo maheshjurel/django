@@ -5,11 +5,21 @@ from django.apps.registry import Apps
 from django.contrib.admin.models import LogEntry
 from django.core.exceptions import AppRegistryNotReady, ImproperlyConfigured
 from django.db import models
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, ignore_warnings, override_settings
 from django.test.utils import extend_sys_path, isolate_apps
+from django.utils.deprecation import RemovedInDjango41Warning
 
-from .default_config_app.apps import CustomConfig
+from .explicit_default_config_app.apps import ExplicitDefaultConfig
+from .explicit_default_config_empty_apps import ExplicitDefaultConfigEmptyApps
+from .explicit_default_config_mismatch_app.not_apps import (
+    ExplicitDefaultConfigMismatch,
+)
+from .explicit_default_config_without_apps import (
+    ExplicitDefaultConfigWithoutApps,
+)
 from .models import SoAlternative, TotallyNormal, new_apps
+from .one_config_app.apps import OneConfig
+from .two_configs_one_default_app.apps import TwoConfig
 
 # Small list with a variety of cases for tests that iterate on installed apps.
 # Intentionally not in alphabetical order to check if the order is preserved.
@@ -45,15 +55,19 @@ class AppsTests(SimpleTestCase):
         Tests the ready property of the master registry.
         """
         # The master app registry is always ready when the tests run.
-        self.assertTrue(apps.ready)
+        self.assertIs(apps.ready, True)
         # Non-master app registries are populated in __init__.
-        self.assertTrue(Apps().ready)
+        self.assertIs(Apps().ready, True)
+        # The condition is set when apps are ready
+        self.assertIs(apps.ready_event.is_set(), True)
+        self.assertIs(Apps().ready_event.is_set(), True)
 
     def test_bad_app_config(self):
         """
         Tests when INSTALLED_APPS contains an incorrect app config.
         """
-        with self.assertRaises(ImproperlyConfigured):
+        msg = "'apps.apps.BadConfig' must supply a name attribute."
+        with self.assertRaisesMessage(ImproperlyConfigured, msg):
             with self.settings(INSTALLED_APPS=['apps.apps.BadConfig']):
                 pass
 
@@ -61,7 +75,8 @@ class AppsTests(SimpleTestCase):
         """
         Tests when INSTALLED_APPS contains a class that isn't an app config.
         """
-        with self.assertRaises(ImproperlyConfigured):
+        msg = "'apps.apps.NotAConfig' isn't a subclass of AppConfig."
+        with self.assertRaisesMessage(ImproperlyConfigured, msg):
             with self.settings(INSTALLED_APPS=['apps.apps.NotAConfig']):
                 pass
 
@@ -79,17 +94,56 @@ class AppsTests(SimpleTestCase):
                 pass
 
     def test_no_such_app_config(self):
-        """
-        Tests when INSTALLED_APPS contains an entry that doesn't exist.
-        """
-        with self.assertRaises(ImportError):
+        msg = "Module 'apps' does not contain a 'NoSuchConfig' class."
+        with self.assertRaisesMessage(ImportError, msg):
+            with self.settings(INSTALLED_APPS=['apps.NoSuchConfig']):
+                pass
+
+    def test_no_such_app_config_with_choices(self):
+        msg = (
+            "Module 'apps.apps' does not contain a 'NoSuchConfig' class. "
+            "Choices are: 'BadConfig', 'MyAdmin', 'MyAuth', 'NoSuchApp', "
+            "'PlainAppsConfig', 'RelabeledAppsConfig'."
+        )
+        with self.assertRaisesMessage(ImportError, msg):
             with self.settings(INSTALLED_APPS=['apps.apps.NoSuchConfig']):
                 pass
 
-    def test_default_app_config(self):
-        with self.settings(INSTALLED_APPS=['apps.default_config_app']):
-            config = apps.get_app_config('default_config_app')
-        self.assertIsInstance(config, CustomConfig)
+    def test_no_config_app(self):
+        """Load an app that doesn't provide an AppConfig class."""
+        with self.settings(INSTALLED_APPS=['apps.no_config_app']):
+            config = apps.get_app_config('no_config_app')
+        self.assertIsInstance(config, AppConfig)
+
+    def test_one_config_app(self):
+        """Load an app that provides an AppConfig class."""
+        with self.settings(INSTALLED_APPS=['apps.one_config_app']):
+            config = apps.get_app_config('one_config_app')
+        self.assertIsInstance(config, OneConfig)
+
+    def test_two_configs_app(self):
+        """Load an app that provides two AppConfig classes."""
+        with self.settings(INSTALLED_APPS=['apps.two_configs_app']):
+            config = apps.get_app_config('two_configs_app')
+        self.assertIsInstance(config, AppConfig)
+
+    def test_two_default_configs_app(self):
+        """Load an app that provides two default AppConfig classes."""
+        msg = (
+            "'apps.two_default_configs_app.apps' declares more than one "
+            "default AppConfig: 'TwoConfig', 'TwoConfigBis'."
+        )
+        with self.assertRaisesMessage(RuntimeError, msg):
+            with self.settings(INSTALLED_APPS=['apps.two_default_configs_app']):
+                pass
+
+    def test_two_configs_one_default_app(self):
+        """
+        Load an app that provides two AppConfig classes, one being the default.
+        """
+        with self.settings(INSTALLED_APPS=['apps.two_configs_one_default_app']):
+            config = apps.get_app_config('two_configs_one_default_app')
+        self.assertIsInstance(config, TwoConfig)
 
     @override_settings(INSTALLED_APPS=SOME_INSTALLED_APPS)
     def test_get_app_configs(self):
@@ -97,9 +151,7 @@ class AppsTests(SimpleTestCase):
         Tests apps.get_app_configs().
         """
         app_configs = apps.get_app_configs()
-        self.assertListEqual(
-            [app_config.name for app_config in app_configs],
-            SOME_INSTALLED_APPS_NAMES)
+        self.assertEqual([app_config.name for app_config in app_configs], SOME_INSTALLED_APPS_NAMES)
 
     @override_settings(INSTALLED_APPS=SOME_INSTALLED_APPS)
     def test_get_app_config(self):
@@ -124,10 +176,10 @@ class AppsTests(SimpleTestCase):
         """
         Tests apps.is_installed().
         """
-        self.assertTrue(apps.is_installed('django.contrib.admin'))
-        self.assertTrue(apps.is_installed('django.contrib.auth'))
-        self.assertTrue(apps.is_installed('django.contrib.staticfiles'))
-        self.assertFalse(apps.is_installed('django.contrib.admindocs'))
+        self.assertIs(apps.is_installed('django.contrib.admin'), True)
+        self.assertIs(apps.is_installed('django.contrib.auth'), True)
+        self.assertIs(apps.is_installed('django.contrib.staticfiles'), True)
+        self.assertIs(apps.is_installed('django.contrib.admindocs'), False)
 
     @override_settings(INSTALLED_APPS=SOME_INSTALLED_APPS)
     def test_get_model(self):
@@ -184,6 +236,19 @@ class AppsTests(SimpleTestCase):
             new_apps.get_model("apps", "TotallyNormal")
         self.assertEqual(new_apps.get_model("apps", "SoAlternative"), SoAlternative)
 
+    def test_models_not_loaded(self):
+        """
+        apps.get_models() raises an exception if apps.models_ready isn't True.
+        """
+        apps.models_ready = False
+        try:
+            # The cache must be cleared to trigger the exception.
+            apps.get_models.cache_clear()
+            with self.assertRaisesMessage(AppRegistryNotReady, "Models aren't loaded yet."):
+                apps.get_models()
+        finally:
+            apps.models_ready = True
+
     def test_dynamic_load(self):
         """
         Makes a new model at runtime and ensures it goes into the right place.
@@ -196,12 +261,12 @@ class AppsTests(SimpleTestCase):
             'app_label': "apps",
             'apps': new_apps,
         }
-        meta = type("Meta", tuple(), meta_contents)
+        meta = type("Meta", (), meta_contents)
         body['Meta'] = meta
         body['__module__'] = TotallyNormal.__module__
         temp_model = type("SouthPonies", (models.Model,), body)
         # Make sure it appeared in the right place!
-        self.assertListEqual(list(apps.get_app_config("apps").get_models()), old_models)
+        self.assertEqual(list(apps.get_app_config("apps").get_models()), old_models)
         with self.assertRaises(LookupError):
             apps.get_model("apps", "SouthPonies")
         self.assertEqual(new_apps.get_model("apps", "SouthPonies"), temp_model)
@@ -217,7 +282,7 @@ class AppsTests(SimpleTestCase):
         }
 
         body = {}
-        body['Meta'] = type("Meta", tuple(), meta_contents)
+        body['Meta'] = type("Meta", (), meta_contents)
         body['__module__'] = TotallyNormal.__module__
         type("SouthPonies", (models.Model,), body)
 
@@ -225,7 +290,7 @@ class AppsTests(SimpleTestCase):
         # was reloaded and issue a warning. This use-case is
         # useful for REPL. Refs #23621.
         body = {}
-        body['Meta'] = type("Meta", tuple(), meta_contents)
+        body['Meta'] = type("Meta", (), meta_contents)
         body['__module__'] = TotallyNormal.__module__
         msg = (
             "Model 'apps.southponies' was already registered. "
@@ -238,7 +303,7 @@ class AppsTests(SimpleTestCase):
         # If it doesn't appear to be a reloaded module then we expect
         # a RuntimeError.
         body = {}
-        body['Meta'] = type("Meta", tuple(), meta_contents)
+        body['Meta'] = type("Meta", (), meta_contents)
         body['__module__'] = TotallyNormal.__module__ + '.whatever'
         with self.assertRaisesMessage(RuntimeError, "Conflicting 'southponies' models in application 'apps':"):
             type("SouthPonies", (models.Model,), body)
@@ -275,7 +340,7 @@ class AppsTests(SimpleTestCase):
 
         # LazyModelA shouldn't be waited on since it's already registered,
         # and LazyModelC shouldn't be waited on until LazyModelB exists.
-        self.assertSetEqual(set(apps._pending_operations) - initial_pending, {('apps', 'lazyb')})
+        self.assertEqual(set(apps._pending_operations) - initial_pending, {('apps', 'lazyb')})
 
         # Multiple operations can wait on the same model
         apps.lazy_model_operation(test_func, ('apps', 'lazyb'))
@@ -283,16 +348,16 @@ class AppsTests(SimpleTestCase):
         class LazyB(models.Model):
             pass
 
-        self.assertListEqual(model_classes, [LazyB])
+        self.assertEqual(model_classes, [LazyB])
 
         # Now we are just waiting on LazyModelC.
-        self.assertSetEqual(set(apps._pending_operations) - initial_pending, {('apps', 'lazyc')})
+        self.assertEqual(set(apps._pending_operations) - initial_pending, {('apps', 'lazyc')})
 
         class LazyC(models.Model):
             pass
 
         # Everything should be loaded - make sure the callback was executed properly.
-        self.assertListEqual(model_classes, [LazyA, LazyB, LazyB, LazyC, LazyA])
+        self.assertEqual(model_classes, [LazyA, LazyB, LazyB, LazyC, LazyA])
 
 
 class Stub:
@@ -414,3 +479,106 @@ class NamespacePackageAppTests(SimpleTestCase):
             with self.settings(INSTALLED_APPS=['nsapp.apps.NSAppConfig']):
                 app_config = apps.get_app_config('nsapp')
                 self.assertEqual(app_config.path, self.app_path)
+
+
+class DeprecationTests(SimpleTestCase):
+    @ignore_warnings(category=RemovedInDjango41Warning)
+    def test_explicit_default_app_config(self):
+        with self.settings(INSTALLED_APPS=['apps.explicit_default_config_app']):
+            config = apps.get_app_config('explicit_default_config_app')
+        self.assertIsInstance(config, ExplicitDefaultConfig)
+
+    def test_explicit_default_app_config_warning(self):
+        """
+        Load an app that specifies a default AppConfig class matching the
+        autodetected one.
+        """
+        msg = (
+            "'apps.explicit_default_config_app' defines default_app_config = "
+            "'apps.explicit_default_config_app.apps.ExplicitDefaultConfig'. "
+            "Django now detects this configuration automatically. You can "
+            "remove default_app_config."
+        )
+        with self.assertRaisesMessage(RemovedInDjango41Warning, msg):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_app']):
+                pass
+        with ignore_warnings(category=RemovedInDjango41Warning):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_app']):
+                self.assertIsInstance(
+                    apps.get_app_config('explicit_default_config_app'),
+                    ExplicitDefaultConfig,
+                )
+
+    def test_explicit_default_app_config_mismatch(self):
+        """
+        Load an app that specifies a default AppConfig class not matching the
+        autodetected one.
+        """
+        msg = (
+            "'apps.explicit_default_config_mismatch_app' defines "
+            "default_app_config = 'apps.explicit_default_config_mismatch_app."
+            "not_apps.ExplicitDefaultConfigMismatch'. However, Django's "
+            "automatic detection picked another configuration, 'apps."
+            "explicit_default_config_mismatch_app.apps."
+            "ImplicitDefaultConfigMismatch'. You should move the default "
+            "config class to the apps submodule of your application and, if "
+            "this module defines several config classes, mark the default one "
+            "with default = True."
+        )
+        with self.assertRaisesMessage(RemovedInDjango41Warning, msg):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_mismatch_app']):
+                pass
+        with ignore_warnings(category=RemovedInDjango41Warning):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_mismatch_app']):
+                self.assertIsInstance(
+                    apps.get_app_config('explicit_default_config_mismatch_app'),
+                    ExplicitDefaultConfigMismatch,
+                )
+
+    def test_explicit_default_app_config_empty_apps(self):
+        """
+        Load an app that specifies a default AppConfig class in __init__ and
+        have an empty apps module.
+        """
+        msg = (
+            "'apps.explicit_default_config_empty_apps' defines "
+            "default_app_config = 'apps.explicit_default_config_empty_apps."
+            "ExplicitDefaultConfigEmptyApps'. However, Django's automatic "
+            "detection did not find this configuration. You should move the "
+            "default config class to the apps submodule of your application "
+            "and, if this module defines several config classes, mark the "
+            "default one with default = True."
+        )
+        with self.assertRaisesMessage(RemovedInDjango41Warning, msg):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_empty_apps']):
+                pass
+        with ignore_warnings(category=RemovedInDjango41Warning):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_empty_apps']):
+                self.assertIsInstance(
+                    apps.get_app_config('explicit_default_config_empty_apps'),
+                    ExplicitDefaultConfigEmptyApps,
+                )
+
+    def test_explicit_default_app_config_without_apps(self):
+        """
+        Load an app that specifies a default AppConfig class in __init__ and do
+        not have an apps module.
+        """
+        msg = (
+            "'apps.explicit_default_config_without_apps' defines "
+            "default_app_config = 'apps.explicit_default_config_without_apps."
+            "ExplicitDefaultConfigWithoutApps'. However, Django's automatic "
+            "detection did not find this configuration. You should move the "
+            "default config class to the apps submodule of your application "
+            "and, if this module defines several config classes, mark the "
+            "default one with default = True."
+        )
+        with self.assertRaisesMessage(RemovedInDjango41Warning, msg):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_without_apps']):
+                pass
+        with ignore_warnings(category=RemovedInDjango41Warning):
+            with self.settings(INSTALLED_APPS=['apps.explicit_default_config_without_apps']):
+                self.assertIsInstance(
+                    apps.get_app_config('explicit_default_config_without_apps'),
+                    ExplicitDefaultConfigWithoutApps,
+                )

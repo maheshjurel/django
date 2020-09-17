@@ -145,7 +145,7 @@ class BasicCustomPKTests(TestCase):
         # Or we can use the real attribute name for the primary key:
         self.assertEqual(e.employee_code, 123)
 
-        with self.assertRaises(AttributeError):
+        with self.assertRaisesMessage(AttributeError, "'Employee' object has no attribute 'id'"):
             e.id
 
     def test_in_bulk(self):
@@ -187,12 +187,12 @@ class CustomPKTests(TestCase):
         Business.objects.create(pk="Tears")
 
     def test_unicode_pk(self):
-        # Primary key may be unicode string
+        # Primary key may be Unicode string.
         Business.objects.create(name='jaźń')
 
     def test_unique_pk(self):
-        # The primary key must also obviously be unique, so trying to create a
-        # new object with the same primary key will fail.
+        # The primary key must also be unique, so trying to create a new object
+        # with the same primary key will fail.
         Employee.objects.create(
             employee_code=123, first_name="Frank", last_name="Jones"
         )

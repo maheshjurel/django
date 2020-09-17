@@ -1,31 +1,49 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 import argparse
 import atexit
 import copy
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import warnings
 
-import django
-from django.apps import apps
-from django.conf import settings
-from django.db import connection, connections
-from django.test import TestCase, TransactionTestCase
-from django.test.runner import default_test_processes
-from django.test.selenium import SeleniumTestCaseBase
-from django.test.utils import get_runner
-from django.utils.deprecation import (
-    RemovedInDjango21Warning, RemovedInDjango30Warning,
-)
-from django.utils.log import DEFAULT_LOGGING
+try:
+    import django
+except ImportError as e:
+    raise RuntimeError(
+        'Django module not found, reference tests/README.rst for instructions.'
+    ) from e
+else:
+    from django.apps import apps
+    from django.conf import settings
+    from django.db import connection, connections
+    from django.test import TestCase, TransactionTestCase
+    from django.test.runner import default_test_processes
+    from django.test.selenium import SeleniumTestCaseBase
+    from django.test.utils import NullTimeKeeper, TimeKeeper, get_runner
+    from django.utils.deprecation import (
+        RemovedInDjango40Warning, RemovedInDjango41Warning,
+    )
+    from django.utils.log import DEFAULT_LOGGING
+    from django.utils.version import PY37
+
+try:
+    import MySQLdb
+except ImportError:
+    pass
+else:
+    # Ignore informational warnings from QuerySet.explain().
+    warnings.filterwarnings('ignore', r'\(1003, *', category=MySQLdb.Warning)
 
 # Make deprecation warnings errors to ensure no usage of deprecated features.
-warnings.simplefilter("error", RemovedInDjango30Warning)
-warnings.simplefilter("error", RemovedInDjango21Warning)
-# Make runtime warning errors to ensure no usage of error prone patterns.
+warnings.simplefilter("error", RemovedInDjango40Warning)
+warnings.simplefilter('error', RemovedInDjango41Warning)
+# Make resource and runtime warning errors to ensure no usage of error prone
+# patterns.
+warnings.simplefilter("error", ResourceWarning)
 warnings.simplefilter("error", RuntimeWarning)
 # Ignore known warnings in test dependencies.
 warnings.filterwarnings("ignore", "'U' mode is deprecated", DeprecationWarning, module='docutils.io')
@@ -47,8 +65,7 @@ atexit.register(shutil.rmtree, TMPDIR)
 SUBDIRS_TO_SKIP = [
     'data',
     'import_error_package',
-    'test_discovery_sample',
-    'test_discovery_sample2',
+    'test_runner_apps',
 ]
 
 ALWAYS_INSTALLED_APPS = [
@@ -73,27 +90,28 @@ ALWAYS_MIDDLEWARE = [
 # avoid "RuntimeError: Model class X doesn't declare an explicit app_label
 # and isn't in an application in INSTALLED_APPS."
 CONTRIB_TESTS_TO_APPS = {
-    'flatpages_tests': 'django.contrib.flatpages',
-    'redirects_tests': 'django.contrib.redirects',
+    'deprecation': ['django.contrib.flatpages', 'django.contrib.redirects'],
+    'flatpages_tests': ['django.contrib.flatpages'],
+    'redirects_tests': ['django.contrib.redirects'],
 }
 
 
 def get_test_modules():
     modules = []
-    discovery_paths = [
-        (None, RUNTESTS_DIR),
+    discovery_paths = [(None, RUNTESTS_DIR)]
+    if connection.features.gis_enabled:
         # GIS tests are in nested apps
-        ('gis_tests', os.path.join(RUNTESTS_DIR, 'gis_tests')),
-    ]
+        discovery_paths.append(('gis_tests', os.path.join(RUNTESTS_DIR, 'gis_tests')))
+    else:
+        SUBDIRS_TO_SKIP.append('gis_tests')
 
     for modpath, dirpath in discovery_paths:
-        for f in os.listdir(dirpath):
-            if ('.' in f or
-                    os.path.basename(f) in SUBDIRS_TO_SKIP or
-                    os.path.isfile(f) or
-                    not os.path.exists(os.path.join(dirpath, f, '__init__.py'))):
-                continue
-            modules.append((modpath, f))
+        for f in os.scandir(dirpath):
+            if ('.' not in f.name and
+                    os.path.basename(f.name) not in SUBDIRS_TO_SKIP and
+                    not f.is_file() and
+                    os.path.exists(os.path.join(f.path, '__init__.py'))):
+                modules.append((modpath, f.name))
     return modules
 
 
@@ -101,7 +119,13 @@ def get_installed():
     return [app_config.name for app_config in apps.get_app_configs()]
 
 
-def setup(verbosity, test_labels, parallel):
+def setup(verbosity, test_labels, parallel, start_at, start_after):
+    # Reduce the given test labels to just the app module path.
+    test_labels_set = set()
+    for label in test_labels:
+        bits = label.split('.')[:1]
+        test_labels_set.add('.'.join(bits))
+
     if verbosity >= 1:
         msg = "Testing against Django installed in '%s'" % os.path.dirname(django.__file__)
         max_parallel = default_test_processes() if parallel == 0 else parallel
@@ -161,39 +185,53 @@ def setup(verbosity, test_labels, parallel):
     settings.LOGGING = log_config
     settings.SILENCED_SYSTEM_CHECKS = [
         'fields.W342',  # ForeignKey(unique=True) -> OneToOneField
+        'fields.W903',  # NullBooleanField deprecated.
     ]
 
     # Load all the ALWAYS_INSTALLED_APPS.
     django.setup()
 
+    # It would be nice to put this validation earlier but it must come after
+    # django.setup() so that connection.features.gis_enabled can be accessed
+    # without raising AppRegistryNotReady when running gis_tests in isolation
+    # on some backends (e.g. PostGIS).
+    if 'gis_tests' in test_labels_set and not connection.features.gis_enabled:
+        print('Aborting: A GIS database backend is required to run gis_tests.')
+        sys.exit(1)
+
+    def _module_match_label(module_label, label):
+        # Exact or ancestor match.
+        return module_label == label or module_label.startswith(label + '.')
+
     # Load all the test model apps.
     test_modules = get_test_modules()
 
-    # Reduce given test labels to just the app module path
-    test_labels_set = set()
-    for label in test_labels:
-        bits = label.split('.')[:1]
-        test_labels_set.add('.'.join(bits))
-
+    found_start = not (start_at or start_after)
     installed_app_names = set(get_installed())
     for modpath, module_name in test_modules:
         if modpath:
-            module_label = '.'.join([modpath, module_name])
+            module_label = modpath + '.' + module_name
         else:
             module_label = module_name
+        if not found_start:
+            if start_at and _module_match_label(module_label, start_at):
+                found_start = True
+            elif start_after and _module_match_label(module_label, start_after):
+                found_start = True
+                continue
+            else:
+                continue
         # if the module (or an ancestor) was named on the command line, or
         # no modules were named (i.e., run all), import
         # this module and add it to INSTALLED_APPS.
-        if not test_labels:
-            module_found_in_labels = True
-        else:
-            module_found_in_labels = any(
-                # exact match or ancestor match
-                module_label == label or module_label.startswith(label + '.')
-                for label in test_labels_set)
+        module_found_in_labels = not test_labels or any(
+            _module_match_label(module_label, label) for label in test_labels_set
+        )
 
         if module_name in CONTRIB_TESTS_TO_APPS and module_found_in_labels:
-            settings.INSTALLED_APPS.append(CONTRIB_TESTS_TO_APPS[module_name])
+            for contrib_app in CONTRIB_TESTS_TO_APPS[module_name]:
+                if contrib_app not in settings.INSTALLED_APPS:
+                    settings.INSTALLED_APPS.append(contrib_app)
 
         if module_found_in_labels and module_label not in installed_app_names:
             if verbosity >= 2:
@@ -217,6 +255,12 @@ def teardown(state):
     # Restore the old settings.
     for key, value in state.items():
         setattr(settings, key, value)
+    # Discard the multiprocessing.util finalizer that tries to remove a
+    # temporary directory that's already removed by this script's
+    # atexit.register(shutil.rmtree, TMPDIR) handler. Prevents
+    # FileNotFoundError at the end of a test run (#27890).
+    from multiprocessing.util import _finalizer_registry
+    _finalizer_registry.pop((-100, 0), None)
 
 
 def actual_test_processes(parallel):
@@ -245,8 +289,10 @@ class ActionSelenium(argparse.Action):
 
 
 def django_tests(verbosity, interactive, failfast, keepdb, reverse,
-                 test_labels, debug_sql, parallel, tags, exclude_tags):
-    state = setup(verbosity, test_labels, parallel)
+                 test_labels, debug_sql, parallel, tags, exclude_tags,
+                 test_name_patterns, start_at, start_after, pdb, buffer,
+                 timing):
+    state = setup(verbosity, test_labels, parallel, start_at, start_after)
     extra_tests = []
 
     # Run the test suite, including the extra validation tests.
@@ -264,6 +310,10 @@ def django_tests(verbosity, interactive, failfast, keepdb, reverse,
         parallel=actual_test_processes(parallel),
         tags=tags,
         exclude_tags=exclude_tags,
+        test_name_patterns=test_name_patterns,
+        pdb=pdb,
+        buffer=buffer,
+        timing=timing,
     )
     failures = test_runner.run_tests(
         test_labels or get_installed(),
@@ -290,8 +340,8 @@ def get_subprocess_args(options):
     return subprocess_args
 
 
-def bisect_tests(bisection_label, options, test_labels, parallel):
-    state = setup(options.verbosity, test_labels, parallel)
+def bisect_tests(bisection_label, options, test_labels, parallel, start_at, start_after):
+    state = setup(options.verbosity, test_labels, parallel, start_at, start_after)
 
     test_labels = test_labels or get_installed()
 
@@ -314,22 +364,22 @@ def bisect_tests(bisection_label, options, test_labels, parallel):
         test_labels_b = test_labels[midpoint:] + [bisection_label]
         print('***** Pass %da: Running the first half of the test suite' % iteration)
         print('***** Test labels: %s' % ' '.join(test_labels_a))
-        failures_a = subprocess.call(subprocess_args + test_labels_a)
+        failures_a = subprocess.run(subprocess_args + test_labels_a)
 
         print('***** Pass %db: Running the second half of the test suite' % iteration)
         print('***** Test labels: %s' % ' '.join(test_labels_b))
         print('')
-        failures_b = subprocess.call(subprocess_args + test_labels_b)
+        failures_b = subprocess.run(subprocess_args + test_labels_b)
 
-        if failures_a and not failures_b:
+        if failures_a.returncode and not failures_b.returncode:
             print("***** Problem found in first half. Bisecting again...")
             iteration += 1
             test_labels = test_labels_a[:-1]
-        elif failures_b and not failures_a:
+        elif failures_b.returncode and not failures_a.returncode:
             print("***** Problem found in second half. Bisecting again...")
             iteration += 1
             test_labels = test_labels_b[:-1]
-        elif failures_a and failures_b:
+        elif failures_a.returncode and failures_b.returncode:
             print("***** Multiple sources of failure found")
             break
         else:
@@ -341,8 +391,8 @@ def bisect_tests(bisection_label, options, test_labels, parallel):
     teardown(state)
 
 
-def paired_tests(paired_test, options, test_labels, parallel):
-    state = setup(options.verbosity, test_labels, parallel)
+def paired_tests(paired_test, options, test_labels, parallel, start_at, start_after):
+    state = setup(options.verbosity, test_labels, parallel, start_at, start_after)
 
     test_labels = test_labels or get_installed()
 
@@ -382,15 +432,15 @@ if __name__ == "__main__":
         help='Verbosity level; 0=minimal output, 1=normal output, 2=all output',
     )
     parser.add_argument(
-        '--noinput', action='store_false', dest='interactive', default=True,
+        '--noinput', action='store_false', dest='interactive',
         help='Tells Django to NOT prompt the user for input of any kind.',
     )
     parser.add_argument(
-        '--failfast', action='store_true', dest='failfast', default=False,
+        '--failfast', action='store_true',
         help='Tells Django to stop running the test suite after first failed test.',
     )
     parser.add_argument(
-        '-k', '--keepdb', action='store_true', dest='keepdb', default=False,
+        '--keepdb', action='store_true',
         help='Tells Django to preserve the test database between runs.',
     )
     parser.add_argument(
@@ -409,20 +459,33 @@ if __name__ == "__main__":
         help='Run the test suite in pairs with the named test to find problem pairs.',
     )
     parser.add_argument(
-        '--reverse', action='store_true', default=False,
+        '--reverse', action='store_true',
         help='Sort test suites and test cases in opposite order to debug '
              'test side effects not apparent with normal execution lineup.',
     )
     parser.add_argument(
-        '--selenium', dest='selenium', action=ActionSelenium, metavar='BROWSERS',
+        '--selenium', action=ActionSelenium, metavar='BROWSERS',
         help='A comma-separated list of browsers to run the Selenium tests against.',
     )
     parser.add_argument(
-        '--debug-sql', action='store_true', dest='debug_sql', default=False,
+        '--headless', action='store_true',
+        help='Run selenium tests in headless mode, if the browser supports the option.',
+    )
+    parser.add_argument(
+        '--selenium-hub',
+        help='A URL for a selenium hub instance to use in combination with --selenium.',
+    )
+    parser.add_argument(
+        '--external-host', default=socket.gethostname(),
+        help='The external host that can be reached by the selenium hub instance when running Selenium '
+             'tests via Selenium Hub.',
+    )
+    parser.add_argument(
+        '--debug-sql', action='store_true',
         help='Turn on the SQL query logger within tests.',
     )
     parser.add_argument(
-        '--parallel', dest='parallel', nargs='?', default=0, type=int,
+        '--parallel', nargs='?', default=0, type=int,
         const=default_test_processes(), metavar='N',
         help='Run tests using up to N parallel processes.',
     )
@@ -434,17 +497,62 @@ if __name__ == "__main__":
         '--exclude-tag', dest='exclude_tags', action='append',
         help='Do not run tests with the specified tag. Can be used multiple times.',
     )
+    parser.add_argument(
+        '--start-after', dest='start_after',
+        help='Run tests starting after the specified top-level module.',
+    )
+    parser.add_argument(
+        '--start-at', dest='start_at',
+        help='Run tests starting at the specified top-level module.',
+    )
+    parser.add_argument(
+        '--pdb', action='store_true',
+        help='Runs the PDB debugger on error or failure.'
+    )
+    parser.add_argument(
+        '-b', '--buffer', action='store_true',
+        help='Discard output of passing tests.',
+    )
+    parser.add_argument(
+        '--timing', action='store_true',
+        help='Output timings, including database set up and total run time.',
+    )
+    if PY37:
+        parser.add_argument(
+            '-k', dest='test_name_patterns', action='append',
+            help=(
+                'Only run test methods and classes matching test name pattern. '
+                'Same as unittest -k option. Can be used multiple times.'
+            ),
+        )
 
     options = parser.parse_args()
+
+    using_selenium_hub = options.selenium and options.selenium_hub
+    if options.selenium_hub and not options.selenium:
+        parser.error('--selenium-hub and --external-host require --selenium to be used.')
+    if using_selenium_hub and not options.external_host:
+        parser.error('--selenium-hub and --external-host must be used together.')
 
     # Allow including a trailing slash on app_labels for tab completion convenience
     options.modules = [os.path.normpath(labels) for labels in options.modules]
 
+    mutually_exclusive_options = [options.start_at, options.start_after, options.modules]
+    enabled_module_options = [bool(option) for option in mutually_exclusive_options].count(True)
+    if enabled_module_options > 1:
+        print('Aborting: --start-at, --start-after, and test labels are mutually exclusive.')
+        sys.exit(1)
+    for opt_name in ['start_at', 'start_after']:
+        opt_val = getattr(options, opt_name)
+        if opt_val:
+            if '.' in opt_val:
+                print('Aborting: --%s must be a top-level module.' % opt_name.replace('_', '-'))
+                sys.exit(1)
+            setattr(options, opt_name, os.path.normpath(opt_val))
     if options.settings:
         os.environ['DJANGO_SETTINGS_MODULE'] = options.settings
     else:
-        if "DJANGO_SETTINGS_MODULE" not in os.environ:
-            os.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
         options.settings = os.environ['DJANGO_SETTINGS_MODULE']
 
     if options.selenium:
@@ -452,18 +560,34 @@ if __name__ == "__main__":
             options.tags = ['selenium']
         elif 'selenium' not in options.tags:
             options.tags.append('selenium')
+        if options.selenium_hub:
+            SeleniumTestCaseBase.selenium_hub = options.selenium_hub
+            SeleniumTestCaseBase.external_host = options.external_host
+        SeleniumTestCaseBase.headless = options.headless
         SeleniumTestCaseBase.browsers = options.selenium
 
     if options.bisect:
-        bisect_tests(options.bisect, options, options.modules, options.parallel)
-    elif options.pair:
-        paired_tests(options.pair, options, options.modules, options.parallel)
-    else:
-        failures = django_tests(
-            options.verbosity, options.interactive, options.failfast,
-            options.keepdb, options.reverse, options.modules,
-            options.debug_sql, options.parallel, options.tags,
-            options.exclude_tags,
+        bisect_tests(
+            options.bisect, options, options.modules, options.parallel,
+            options.start_at, options.start_after,
         )
+    elif options.pair:
+        paired_tests(
+            options.pair, options, options.modules, options.parallel,
+            options.start_at, options.start_after,
+        )
+    else:
+        time_keeper = TimeKeeper() if options.timing else NullTimeKeeper()
+        with time_keeper.timed('Total run'):
+            failures = django_tests(
+                options.verbosity, options.interactive, options.failfast,
+                options.keepdb, options.reverse, options.modules,
+                options.debug_sql, options.parallel, options.tags,
+                options.exclude_tags,
+                getattr(options, 'test_name_patterns', None),
+                options.start_at, options.start_after, options.pdb, options.buffer,
+                options.timing,
+            )
+        time_keeper.print_results()
         if failures:
             sys.exit(1)

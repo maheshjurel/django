@@ -1,6 +1,7 @@
 import mimetypes
 import unittest
 from os import path
+from urllib.parse import quote
 
 from django.conf.urls.static import static
 from django.core.exceptions import ImproperlyConfigured
@@ -21,14 +22,14 @@ class StaticTests(SimpleTestCase):
 
     def test_serve(self):
         "The static view can serve static media"
-        media_files = ['file.txt', 'file.txt.gz']
+        media_files = ['file.txt', 'file.txt.gz', '%2F.txt']
         for filename in media_files:
-            response = self.client.get('/%s/%s' % (self.prefix, filename))
+            response = self.client.get('/%s/%s' % (self.prefix, quote(filename)))
             response_content = b''.join(response)
             file_path = path.join(media_dir, filename)
             with open(file_path, 'rb') as fp:
                 self.assertEqual(fp.read(), response_content)
-            self.assertEqual(len(response_content), int(response['Content-Length']))
+            self.assertEqual(len(response_content), int(response.headers['Content-Length']))
             self.assertEqual(mimetypes.guess_type(file_path)[1], response.get('Content-Encoding', None))
 
     def test_chunked(self):
@@ -43,7 +44,7 @@ class StaticTests(SimpleTestCase):
 
     def test_unknown_mime_type(self):
         response = self.client.get('/%s/file.unknown' % self.prefix)
-        self.assertEqual('application/octet-stream', response['Content-Type'])
+        self.assertEqual('application/octet-stream', response.headers['Content-Type'])
         response.close()
 
     def test_copes_with_empty_path_component(self):
@@ -86,7 +87,7 @@ class StaticTests(SimpleTestCase):
         response_content = b''.join(response)
         with open(path.join(media_dir, file_name), 'rb') as fp:
             self.assertEqual(fp.read(), response_content)
-        self.assertEqual(len(response_content), int(response['Content-Length']))
+        self.assertEqual(len(response_content), int(response.headers['Content-Length']))
 
     def test_invalid_if_modified_since2(self):
         """Handle even more bogus If-Modified-Since values gracefully
@@ -101,7 +102,7 @@ class StaticTests(SimpleTestCase):
         response_content = b''.join(response)
         with open(path.join(media_dir, file_name), 'rb') as fp:
             self.assertEqual(fp.read(), response_content)
-        self.assertEqual(len(response_content), int(response['Content-Length']))
+        self.assertEqual(len(response_content), int(response.headers['Content-Length']))
 
     def test_404(self):
         response = self.client.get('/%s/nonexistent_resource' % self.prefix)
@@ -109,7 +110,29 @@ class StaticTests(SimpleTestCase):
 
     def test_index(self):
         response = self.client.get('/%s/' % self.prefix)
-        self.assertContains(response, 'Index of /')
+        self.assertContains(response, 'Index of ./')
+        # Directories have a trailing slash.
+        self.assertIn('subdir/', response.context['file_list'])
+
+    def test_index_subdir(self):
+        response = self.client.get('/%s/subdir/' % self.prefix)
+        self.assertContains(response, 'Index of subdir/')
+        # File with a leading dot (e.g. .hidden) aren't displayed.
+        self.assertEqual(response.context['file_list'], ['visible'])
+
+    @override_settings(TEMPLATES=[{
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'OPTIONS': {
+            'loaders': [
+                ('django.template.loaders.locmem.Loader', {
+                    'static/directory_index.html': 'Test index',
+                }),
+            ],
+        },
+    }])
+    def test_index_custom_template(self):
+        response = self.client.get('/%s/' % self.prefix)
+        self.assertEqual(response.content, b'Test index')
 
 
 class StaticHelperTest(StaticTests):
@@ -126,7 +149,7 @@ class StaticHelperTest(StaticTests):
         urls.urlpatterns = self._old_views_urlpatterns
 
     def test_prefix(self):
-        self.assertEqual(static('test')[0].regex.pattern, '^test(?P<path>.*)$')
+        self.assertEqual(static('test')[0].pattern.regex.pattern, '^test(?P<path>.*)$')
 
     @override_settings(DEBUG=False)
     def test_debug_off(self):
@@ -138,8 +161,9 @@ class StaticHelperTest(StaticTests):
             static('')
 
     def test_special_prefix(self):
-        """No URLs are served if prefix contains '://'."""
-        self.assertEqual(static('http://'), [])
+        """No URLs are served if prefix contains a netloc part."""
+        self.assertEqual(static('http://example.org'), [])
+        self.assertEqual(static('//example.org'), [])
 
 
 class StaticUtilsTests(unittest.TestCase):

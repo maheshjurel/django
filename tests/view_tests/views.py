@@ -3,14 +3,16 @@ import decimal
 import logging
 import sys
 
-from django.core.exceptions import PermissionDenied, SuspiciousOperation
+from django.core.exceptions import (
+    BadRequest, PermissionDenied, SuspiciousOperation,
+)
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.template import TemplateDoesNotExist
 from django.urls import get_resolver
 from django.views import View
 from django.views.debug import (
-    SafeExceptionReporterFilter, technical_500_response,
+    ExceptionReporter, SafeExceptionReporterFilter, technical_500_response,
 )
 from django.views.decorators.debug import (
     sensitive_post_parameters, sensitive_variables,
@@ -50,6 +52,10 @@ def raises400(request):
     raise SuspiciousOperation
 
 
+def raises400_bad_request(request):
+    raise BadRequest('Malformed request syntax')
+
+
 def raises403(request):
     raise PermissionDenied("Insufficient Permissions")
 
@@ -76,16 +82,8 @@ def jsi18n(request):
     return render(request, 'jsi18n.html')
 
 
-def old_jsi18n(request):
-    return render(request, 'old_jsi18n.html')
-
-
 def jsi18n_multi_catalogs(request):
     return render(request, 'jsi18n-multi-catalogs.html')
-
-
-def old_jsi18n_multi_catalogs(request):
-    return render(request, 'old_jsi18n-multi-catalogs.html')
 
 
 def raises_template_does_not_exist(request, path='i_dont_exist.html'):
@@ -232,6 +230,22 @@ def custom_exception_reporter_filter_view(request):
     except Exception:
         exc_info = sys.exc_info()
         send_log(request, exc_info)
+        return technical_500_response(request, *exc_info)
+
+
+class CustomExceptionReporter(ExceptionReporter):
+    custom_traceback_text = 'custom traceback text'
+
+    def get_traceback_html(self):
+        return self.custom_traceback_text
+
+
+def custom_reporter_class_view(request):
+    request.exception_reporter_class = CustomExceptionReporter
+    try:
+        raise Exception
+    except Exception:
+        exc_info = sys.exc_info()
         return technical_500_response(request, *exc_info)
 
 

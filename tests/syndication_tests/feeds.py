@@ -29,6 +29,9 @@ class TestRss2Feed(views.Feed):
     def item_updateddate(self, item):
         return item.updated
 
+    def item_comments(self, item):
+        return "%scomments" % item.get_absolute_url()
+
     item_author_name = 'Sally Smith'
     item_author_email = 'test@example.com'
     item_author_link = 'http://www.example.com/'
@@ -134,6 +137,10 @@ class TemplateContextFeed(TestRss2Feed):
         context = super().get_context_data(**kwargs)
         context['foo'] = 'bar'
         return context
+
+
+class TestLanguageFeed(TestRss2Feed):
+    language = 'de'
 
 
 class NaiveDatesFeed(TestAtomFeed):

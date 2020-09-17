@@ -1,9 +1,7 @@
-import json
 from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
-from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import render
 from django.template.loader import render_to_string
@@ -23,7 +21,7 @@ def no_template_view(request):
 def staff_only_view(request):
     "A view that can only be visited by staff. Non staff members get an exception"
     if request.user.is_staff:
-        return HttpResponse('')
+        return HttpResponse()
     else:
         raise CustomTestException()
 
@@ -111,21 +109,19 @@ def return_json_response(request):
     return JsonResponse({'key': 'value'}, **kwargs)
 
 
-def return_json_file(request):
-    "A view that parses and returns a JSON string as a file."
+def return_json_response_latin1(request):
+    return HttpResponse(b'{"a":"\xc5"}', content_type='application/json; charset=latin1')
+
+
+def return_text_file(request):
+    "A view that parses and returns text as a file."
     match = CONTENT_TYPE_RE.match(request.META['CONTENT_TYPE'])
     if match:
-        charset = match.group(1)
+        charset = match[1]
     else:
         charset = settings.DEFAULT_CHARSET
 
-    # This just checks that the uploaded data is JSON
-    obj_dict = json.loads(request.body.decode(charset))
-    obj_json = json.dumps(obj_dict, cls=DjangoJSONEncoder, ensure_ascii=False)
-    response = HttpResponse(obj_json.encode(charset), status=200,
-                            content_type='application/json; charset=%s' % charset)
-    response['Content-Disposition'] = 'attachment; filename=testfile.json'
-    return response
+    return HttpResponse(request.body, status=200, content_type='text/plain; charset=%s' % charset)
 
 
 def check_headers(request):
@@ -158,3 +154,15 @@ def render_template_multiple_times(request):
     """A view that renders a template multiple times."""
     return HttpResponse(
         render_to_string('base.html') + render_to_string('base.html'))
+
+
+def redirect_based_on_extra_headers_1_view(request):
+    if 'HTTP_REDIRECT' in request.META:
+        return HttpResponseRedirect('/redirect_based_on_extra_headers_2/')
+    return HttpResponse()
+
+
+def redirect_based_on_extra_headers_2_view(request):
+    if 'HTTP_REDIRECT' in request.META:
+        return HttpResponseRedirect('/redirects/further/more/')
+    return HttpResponse()
