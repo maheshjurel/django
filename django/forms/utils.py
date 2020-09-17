@@ -2,9 +2,8 @@ import json
 from collections import UserList
 
 from django.conf import settings
-from django.core.exceptions import ValidationError  # backwards compatibility
+from django.core.exceptions import ValidationError
 from django.utils import timezone
-from django.utils.encoding import force_text
 from django.utils.html import escape, format_html, format_html_join, html_safe
 from django.utils.translation import gettext_lazy as _
 
@@ -52,15 +51,18 @@ class ErrorDict(dict):
     def as_data(self):
         return {f: e.as_data() for f, e in self.items()}
 
+    def get_json_data(self, escape_html=False):
+        return {f: e.get_json_data(escape_html) for f, e in self.items()}
+
     def as_json(self, escape_html=False):
-        return json.dumps({f: e.get_json_data(escape_html) for f, e in self.items()})
+        return json.dumps(self.get_json_data(escape_html))
 
     def as_ul(self):
         if not self:
             return ''
         return format_html(
             '<ul class="errorlist">{}</ul>',
-            format_html_join('', '<li>{}{}</li>', ((k, force_text(v)) for k, v in self.items()))
+            format_html_join('', '<li>{}{}</li>', self.items())
         )
 
     def as_text(self):
@@ -90,10 +92,15 @@ class ErrorList(UserList, list):
     def as_data(self):
         return ValidationError(self.data).error_list
 
+    def copy(self):
+        copy = super().copy()
+        copy.error_class = self.error_class
+        return copy
+
     def get_json_data(self, escape_html=False):
         errors = []
         for error in self.as_data():
-            message = list(error)[0]
+            message = next(iter(error))
             errors.append({
                 'message': escape(message) if escape_html else message,
                 'code': error.code or '',
@@ -110,7 +117,7 @@ class ErrorList(UserList, list):
         return format_html(
             '<ul class="{}">{}</ul>',
             self.error_class,
-            format_html_join('', '<li>{}</li>', ((force_text(e),) for e in self))
+            format_html_join('', '<li>{}</li>', ((e,) for e in self))
         )
 
     def as_text(self):
@@ -131,8 +138,8 @@ class ErrorList(UserList, list):
     def __getitem__(self, i):
         error = self.data[i]
         if isinstance(error, ValidationError):
-            return list(error)[0]
-        return force_text(error)
+            return next(iter(error))
+        return error
 
     def __reduce_ex__(self, *args, **kwargs):
         # The `list` reduce function returns an iterator as the fourth element
@@ -157,7 +164,7 @@ def from_current_timezone(value):
             return timezone.make_aware(value, current_timezone)
         except Exception as exc:
             raise ValidationError(
-                _('%(datetime)s couldn\'t be interpreted '
+                _('%(datetime)s couldn’t be interpreted '
                   'in time zone %(current_timezone)s; it '
                   'may be ambiguous or it may not exist.'),
                 code='ambiguous_timezone',
@@ -172,6 +179,5 @@ def to_current_timezone(value):
     to naive datetimes in the current time zone for display.
     """
     if settings.USE_TZ and value is not None and timezone.is_aware(value):
-        current_timezone = timezone.get_current_timezone()
-        return timezone.make_naive(value, current_timezone)
+        return timezone.make_naive(value)
     return value

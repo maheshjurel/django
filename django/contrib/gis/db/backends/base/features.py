@@ -1,6 +1,6 @@
 import re
 
-from django.contrib.gis.db.models import aggregates
+from django.contrib.gis.db import models
 
 
 class BaseSpatialFeatures:
@@ -17,17 +17,15 @@ class BaseSpatialFeatures:
     # Does the backend support storing 3D geometries?
     supports_3d_storage = False
     # Reference implementation of 3D functions is:
-    # http://postgis.net/docs/PostGIS_Special_Functions_Index.html#PostGIS_3D_Functions
+    # https://postgis.net/docs/PostGIS_Special_Functions_Index.html#PostGIS_3D_Functions
     supports_3d_functions = False
     # Does the database support SRID transform operations?
     supports_transform = True
-    # Do geometric relationship operations operate on real shapes (or only on bounding boxes)?
-    supports_real_shape_operations = True
     # Can geometry fields be null?
     supports_null_geometries = True
     # Are empty geometries supported?
     supports_empty_geometries = False
-    # Can the the function be applied on geodetic coordinate systems?
+    # Can the function be applied on geodetic coordinate systems?
     supports_distance_geodetic = True
     supports_length_geodetic = True
     supports_perimeter_geodetic = False
@@ -37,8 +35,10 @@ class BaseSpatialFeatures:
 
     # The following properties indicate if the database backend support
     # certain lookups (dwithin, left and right, relate, ...)
-    supports_distances_lookups = True
     supports_left_right_lookups = False
+    # Does the backend support expressions for specifying distance in the
+    # dwithin lookup?
+    supports_dwithin_distance_expr = True
 
     # Does the database have raster support?
     supports_raster = False
@@ -59,6 +59,10 @@ class BaseSpatialFeatures:
         return 'crosses' in self.connection.ops.gis_operators
 
     @property
+    def supports_distances_lookups(self):
+        return self.has_Distance_function
+
+    @property
     def supports_dwithin_lookup(self):
         return 'dwithin' in self.connection.ops.gis_operators
 
@@ -68,28 +72,28 @@ class BaseSpatialFeatures:
 
     @property
     def supports_isvalid_lookup(self):
-        return 'isvalid' in self.connection.ops.gis_operators
+        return self.has_IsValid_function
 
     # Is the aggregate supported by the database?
     @property
     def supports_collect_aggr(self):
-        return aggregates.Collect not in self.connection.ops.disallowed_aggregates
+        return models.Collect not in self.connection.ops.disallowed_aggregates
 
     @property
     def supports_extent_aggr(self):
-        return aggregates.Extent not in self.connection.ops.disallowed_aggregates
+        return models.Extent not in self.connection.ops.disallowed_aggregates
 
     @property
     def supports_make_line_aggr(self):
-        return aggregates.MakeLine not in self.connection.ops.disallowed_aggregates
+        return models.MakeLine not in self.connection.ops.disallowed_aggregates
 
     @property
     def supports_union_aggr(self):
-        return aggregates.Union not in self.connection.ops.disallowed_aggregates
+        return models.Union not in self.connection.ops.disallowed_aggregates
 
     def __getattr__(self, name):
         m = re.match(r'has_(\w*)_function$', name)
         if m:
-            func_name = m.group(1)
+            func_name = m[1]
             return func_name not in self.connection.ops.unsupported_functions
         raise AttributeError

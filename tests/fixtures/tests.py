@@ -17,16 +17,28 @@ from django.db import IntegrityError, connection
 from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 
 from .models import (
-    Article, Category, PrimaryKeyUUIDModel, ProxySpy, Spy, Tag, Visa,
+    Article, Category, CircularA, CircularB, NaturalKeyThing,
+    PrimaryKeyUUIDModel, ProxySpy, Spy, Tag, Visa,
 )
+
+try:
+    import bz2  # NOQA
+    HAS_BZ2 = True
+except ImportError:
+    HAS_BZ2 = False
+
+try:
+    import lzma  # NOQA
+    HAS_LZMA = True
+except ImportError:
+    HAS_LZMA = False
 
 
 class TestCaseFixtureLoadingTests(TestCase):
     fixtures = ['fixture1.json', 'fixture2.json']
 
-    def testClassFixtures(self):
+    def test_class_fixtures(self):
         "Test case has installed 3 fixture objects"
-        self.assertEqual(Article.objects.count(), 3)
         self.assertQuerysetEqual(Article.objects.all(), [
             '<Article: Django conquers world!>',
             '<Article: Copyright is fine the way it is>',
@@ -40,7 +52,7 @@ class SubclassTestCaseFixtureLoadingTests(TestCaseFixtureLoadingTests):
     """
     fixtures = []
 
-    def testClassFixtures(self):
+    def test_class_fixtures(self):
         "There were no fixture objects installed"
         self.assertEqual(Article.objects.count(), 0)
 
@@ -51,19 +63,22 @@ class DumpDataAssertMixin:
                          natural_foreign_keys=False, natural_primary_keys=False,
                          use_base_manager=False, exclude_list=[], primary_keys=''):
         new_io = StringIO()
+        filename = filename and os.path.join(tempfile.gettempdir(), filename)
+        management.call_command(
+            'dumpdata',
+            *args,
+            format=format,
+            stdout=new_io,
+            stderr=new_io,
+            output=filename,
+            use_natural_foreign_keys=natural_foreign_keys,
+            use_natural_primary_keys=natural_primary_keys,
+            use_base_manager=use_base_manager,
+            exclude=exclude_list,
+            primary_keys=primary_keys,
+        )
         if filename:
-            filename = os.path.join(tempfile.gettempdir(), filename)
-        management.call_command('dumpdata', *args, **{'format': format,
-                                                      'stdout': new_io,
-                                                      'stderr': new_io,
-                                                      'output': filename,
-                                                      'use_natural_foreign_keys': natural_foreign_keys,
-                                                      'use_natural_primary_keys': natural_primary_keys,
-                                                      'use_base_manager': use_base_manager,
-                                                      'exclude': exclude_list,
-                                                      'primary_keys': primary_keys})
-        if filename:
-            with open(filename, "r") as f:
+            with open(filename) as f:
                 command_output = f.read()
             os.remove(filename)
         else:
@@ -335,7 +350,8 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
         self._dumpdata_assert(
             ['sites', 'fixtures'],
             '[{"pk": 1, "model": "sites.site", "fields": {"domain": "example.com", "name": "example.com"}}]',
-            exclude_list=['fixtures'])
+            exclude_list=['fixtures'],
+        )
 
         # Excluding fixtures.Article/Book should leave fixtures.Category
         self._dumpdata_assert(
@@ -371,7 +387,7 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
         with self.assertRaisesMessage(management.CommandError, "Unknown model: fixtures.FooModel"):
             self._dumpdata_assert(['fixtures', 'sites'], '', exclude_list=['fixtures.FooModel'])
 
-    @unittest.skipIf(sys.platform.startswith('win'), "Windows doesn't support '?' in filenames.")
+    @unittest.skipIf(sys.platform == 'win32', "Windows doesn't support '?' in filenames.")
     def test_load_fixture_with_special_characters(self):
         management.call_command('loaddata', 'fixture_with[special]chars', verbosity=0)
         self.assertQuerysetEqual(Article.objects.all(), ['<Article: How To Deal With Special Characters>'])
@@ -495,16 +511,9 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
         parent.
         """
         ProxySpy.objects.create(name='Paul')
-
-        with warnings.catch_warnings(record=True) as warning_list:
-            warnings.simplefilter('always')
+        msg = "fixtures.ProxySpy is a proxy model and won't be serialized."
+        with self.assertWarnsMessage(ProxyModelWarning, msg):
             self._dumpdata_assert(['fixtures.ProxySpy'], '[]')
-        warning = warning_list.pop()
-        self.assertEqual(warning.category, ProxyModelWarning)
-        self.assertEqual(
-            str(warning.message),
-            "fixtures.ProxySpy is a proxy model and won't be serialized."
-        )
 
     def test_dumpdata_proxy_with_concrete(self):
         """
@@ -542,11 +551,38 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
             '<Article: WoW subscribers now outnumber readers>',
         ])
 
+    def test_compressed_loading_gzip(self):
+        management.call_command('loaddata', 'fixture5.json.gz', verbosity=0)
+        self.assertQuerysetEqual(Article.objects.all(), [
+            '<Article: WoW subscribers now outnumber readers>',
+        ])
+
+    @unittest.skipUnless(HAS_BZ2, 'No bz2 library detected.')
+    def test_compressed_loading_bz2(self):
+        management.call_command('loaddata', 'fixture5.json.bz2', verbosity=0)
+        self.assertQuerysetEqual(Article.objects.all(), [
+            '<Article: WoW subscribers now outnumber readers>',
+        ])
+
+    @unittest.skipUnless(HAS_LZMA, 'No lzma library detected.')
+    def test_compressed_loading_lzma(self):
+        management.call_command('loaddata', 'fixture5.json.lzma', verbosity=0)
+        self.assertQuerysetEqual(Article.objects.all(), [
+            '<Article: WoW subscribers now outnumber readers>',
+        ])
+
+    @unittest.skipUnless(HAS_LZMA, 'No lzma library detected.')
+    def test_compressed_loading_xz(self):
+        management.call_command('loaddata', 'fixture5.json.xz', verbosity=0)
+        self.assertQuerysetEqual(Article.objects.all(), [
+            '<Article: WoW subscribers now outnumber readers>',
+        ])
+
     def test_ambiguous_compressed_fixture(self):
-        # The name "fixture5" is ambiguous, so loading it will raise an error
-        with self.assertRaises(management.CommandError) as cm:
+        # The name "fixture5" is ambiguous, so loading raises an error.
+        msg = "Multiple fixtures named 'fixture5'"
+        with self.assertRaisesMessage(management.CommandError, msg):
             management.call_command('loaddata', 'fixture5', verbosity=0)
-            self.assertIn("Multiple fixtures named 'fixture5'", cm.exception.args[0])
 
     def test_db_loading(self):
         # Load db fixtures 1 and 2. These will load using the 'default' database identifier implicitly
@@ -566,10 +602,20 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
         # This won't affect other tests because the database connection
         # is closed at the end of each test.
         if connection.vendor == 'mysql':
-            connection.cursor().execute("SET sql_mode = 'TRADITIONAL'")
-        with self.assertRaises(IntegrityError) as cm:
+            with connection.cursor() as cursor:
+                cursor.execute("SET sql_mode = 'TRADITIONAL'")
+        msg = 'Could not load fixtures.Article(pk=1):'
+        with self.assertRaisesMessage(IntegrityError, msg):
             management.call_command('loaddata', 'invalid.json', verbosity=0)
-            self.assertIn("Could not load fixtures.Article(pk=1):", cm.exception.args[0])
+
+    @unittest.skipUnless(connection.vendor == 'postgresql', 'psycopg2 prohibits null characters in data.')
+    def test_loaddata_null_characters_on_postgresql(self):
+        msg = (
+            'Could not load fixtures.Article(pk=2): '
+            'A string literal cannot contain NUL (0x00) characters.'
+        )
+        with self.assertRaisesMessage(ValueError, msg):
+            management.call_command('loaddata', 'null_character_in_field_value.json')
 
     def test_loaddata_app_option(self):
         with self.assertRaisesMessage(CommandError, "No fixture named 'db_fixture_1' found."):
@@ -592,8 +638,8 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
 
     def test_loading_using(self):
         # Load db fixtures 1 and 2. These will load using the 'default' database identifier explicitly
-        management.call_command('loaddata', 'db_fixture_1', verbosity=0, using='default')
-        management.call_command('loaddata', 'db_fixture_2', verbosity=0, using='default')
+        management.call_command('loaddata', 'db_fixture_1', verbosity=0, database='default')
+        management.call_command('loaddata', 'db_fixture_2', verbosity=0, database='default')
         self.assertQuerysetEqual(Article.objects.all(), [
             '<Article: Who needs more than one database?>',
             '<Article: Who needs to use compressed data?>',
@@ -604,7 +650,7 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
         with self.assertRaisesMessage(CommandError, "No fixture named 'db_fixture_3' found."):
             management.call_command('loaddata', 'db_fixture_3', verbosity=0)
         with self.assertRaisesMessage(CommandError, "No fixture named 'db_fixture_3' found."):
-            management.call_command('loaddata', 'db_fixture_3', verbosity=0, using='default')
+            management.call_command('loaddata', 'db_fixture_3', verbosity=0, database='default')
         self.assertQuerysetEqual(Article.objects.all(), [])
 
     def test_output_formats(self):
@@ -680,6 +726,33 @@ class FixtureLoadingTests(DumpDataAssertMixin, TestCase):
         with self.assertRaisesMessage(management.CommandError, msg):
             management.call_command('loaddata', 'fixture1', exclude=['fixtures.FooModel'], verbosity=0)
 
+    def test_stdin_without_format(self):
+        """Reading from stdin raises an error if format isn't specified."""
+        msg = '--format must be specified when reading from stdin.'
+        with self.assertRaisesMessage(management.CommandError, msg):
+            management.call_command('loaddata', '-', verbosity=0)
+
+    def test_loading_stdin(self):
+        """Loading fixtures from stdin with json and xml."""
+        tests_dir = os.path.dirname(__file__)
+        fixture_json = os.path.join(tests_dir, 'fixtures', 'fixture1.json')
+        fixture_xml = os.path.join(tests_dir, 'fixtures', 'fixture3.xml')
+
+        with mock.patch('django.core.management.commands.loaddata.sys.stdin', open(fixture_json)):
+            management.call_command('loaddata', '--format=json', '-', verbosity=0)
+            self.assertQuerysetEqual(Article.objects.all(), [
+                '<Article: Time to reform copyright>',
+                '<Article: Poker has no place on ESPN>',
+            ])
+
+        with mock.patch('django.core.management.commands.loaddata.sys.stdin', open(fixture_xml)):
+            management.call_command('loaddata', '--format=xml', '-', verbosity=0)
+            self.assertQuerysetEqual(Article.objects.all(), [
+                '<Article: XML identified as leading cause of cancer>',
+                '<Article: Time to reform copyright>',
+                '<Article: Poker on TV is great!>',
+            ])
+
 
 class NonexistentFixtureTests(TestCase):
     """
@@ -723,9 +796,9 @@ class FixtureTransactionTests(DumpDataAssertMixin, TransactionTestCase):
 
         # Try to load fixture 2 using format discovery; this will fail
         # because there are two fixture2's in the fixtures directory
-        with self.assertRaises(management.CommandError) as cm:
+        msg = "Multiple fixtures named 'fixture2'"
+        with self.assertRaisesMessage(management.CommandError, msg):
             management.call_command('loaddata', 'fixture2', verbosity=0)
-            self.assertIn("Multiple fixtures named 'fixture2'", cm.exception.args[0])
 
         # object list is unaffected
         self.assertQuerysetEqual(Article.objects.all(), [
@@ -749,3 +822,115 @@ class FixtureTransactionTests(DumpDataAssertMixin, TransactionTestCase):
             '<Article: Time to reform copyright>',
             '<Article: Poker has no place on ESPN>',
         ])
+
+
+class ForwardReferenceTests(DumpDataAssertMixin, TestCase):
+    def test_forward_reference_fk(self):
+        management.call_command('loaddata', 'forward_reference_fk.json', verbosity=0)
+        t1, t2 = NaturalKeyThing.objects.all()
+        self.assertEqual(t1.other_thing, t2)
+        self.assertEqual(t2.other_thing, t1)
+        self._dumpdata_assert(
+            ['fixtures'],
+            '[{"model": "fixtures.naturalkeything", "pk": 1, '
+            '"fields": {"key": "t1", "other_thing": 2, "other_things": []}}, '
+            '{"model": "fixtures.naturalkeything", "pk": 2, '
+            '"fields": {"key": "t2", "other_thing": 1, "other_things": []}}]',
+        )
+
+    def test_forward_reference_fk_natural_key(self):
+        management.call_command(
+            'loaddata',
+            'forward_reference_fk_natural_key.json',
+            verbosity=0,
+        )
+        t1, t2 = NaturalKeyThing.objects.all()
+        self.assertEqual(t1.other_thing, t2)
+        self.assertEqual(t2.other_thing, t1)
+        self._dumpdata_assert(
+            ['fixtures'],
+            '[{"model": "fixtures.naturalkeything", '
+            '"fields": {"key": "t1", "other_thing": ["t2"], "other_things": []}}, '
+            '{"model": "fixtures.naturalkeything", '
+            '"fields": {"key": "t2", "other_thing": ["t1"], "other_things": []}}]',
+            natural_primary_keys=True,
+            natural_foreign_keys=True,
+        )
+
+    def test_forward_reference_m2m(self):
+        management.call_command('loaddata', 'forward_reference_m2m.json', verbosity=0)
+        self.assertEqual(NaturalKeyThing.objects.count(), 3)
+        t1 = NaturalKeyThing.objects.get_by_natural_key('t1')
+        self.assertQuerysetEqual(
+            t1.other_things.order_by('key'),
+            ['<NaturalKeyThing: t2>', '<NaturalKeyThing: t3>']
+        )
+        self._dumpdata_assert(
+            ['fixtures'],
+            '[{"model": "fixtures.naturalkeything", "pk": 1, '
+            '"fields": {"key": "t1", "other_thing": null, "other_things": [2, 3]}}, '
+            '{"model": "fixtures.naturalkeything", "pk": 2, '
+            '"fields": {"key": "t2", "other_thing": null, "other_things": []}}, '
+            '{"model": "fixtures.naturalkeything", "pk": 3, '
+            '"fields": {"key": "t3", "other_thing": null, "other_things": []}}]',
+        )
+
+    def test_forward_reference_m2m_natural_key(self):
+        management.call_command(
+            'loaddata',
+            'forward_reference_m2m_natural_key.json',
+            verbosity=0,
+        )
+        self.assertEqual(NaturalKeyThing.objects.count(), 3)
+        t1 = NaturalKeyThing.objects.get_by_natural_key('t1')
+        self.assertQuerysetEqual(
+            t1.other_things.order_by('key'),
+            ['<NaturalKeyThing: t2>', '<NaturalKeyThing: t3>']
+        )
+        self._dumpdata_assert(
+            ['fixtures'],
+            '[{"model": "fixtures.naturalkeything", '
+            '"fields": {"key": "t1", "other_thing": null, "other_things": [["t2"], ["t3"]]}}, '
+            '{"model": "fixtures.naturalkeything", '
+            '"fields": {"key": "t2", "other_thing": null, "other_things": []}}, '
+            '{"model": "fixtures.naturalkeything", '
+            '"fields": {"key": "t3", "other_thing": null, "other_things": []}}]',
+            natural_primary_keys=True,
+            natural_foreign_keys=True,
+        )
+
+
+class CircularReferenceTests(DumpDataAssertMixin, TestCase):
+    def test_circular_reference(self):
+        management.call_command('loaddata', 'circular_reference.json', verbosity=0)
+        obj_a = CircularA.objects.get()
+        obj_b = CircularB.objects.get()
+        self.assertEqual(obj_a.obj, obj_b)
+        self.assertEqual(obj_b.obj, obj_a)
+        self._dumpdata_assert(
+            ['fixtures'],
+            '[{"model": "fixtures.circulara", "pk": 1, '
+            '"fields": {"key": "x", "obj": 1}}, '
+            '{"model": "fixtures.circularb", "pk": 1, '
+            '"fields": {"key": "y", "obj": 1}}]',
+        )
+
+    def test_circular_reference_natural_key(self):
+        management.call_command(
+            'loaddata',
+            'circular_reference_natural_key.json',
+            verbosity=0,
+        )
+        obj_a = CircularA.objects.get()
+        obj_b = CircularB.objects.get()
+        self.assertEqual(obj_a.obj, obj_b)
+        self.assertEqual(obj_b.obj, obj_a)
+        self._dumpdata_assert(
+            ['fixtures'],
+            '[{"model": "fixtures.circulara", '
+            '"fields": {"key": "x", "obj": ["y"]}}, '
+            '{"model": "fixtures.circularb", '
+            '"fields": {"key": "y", "obj": ["x"]}}]',
+            natural_primary_keys=True,
+            natural_foreign_keys=True,
+        )

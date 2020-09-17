@@ -1,4 +1,4 @@
-from unittest import skipIf
+from unittest import skipIf, skipUnless
 
 from django.contrib.gis.db.models import fields
 from django.contrib.gis.geos import MultiPolygon, Polygon
@@ -10,17 +10,15 @@ from django.test import (
     TransactionTestCase, skipIfDBFeature, skipUnlessDBFeature,
 )
 
-from ..utils import mysql, spatialite
+from ..utils import mysql, oracle, spatialite
 
-if connection.features.gis_enabled:
-    try:
-        GeometryColumns = connection.ops.geometry_columns()
-        HAS_GEOMETRY_COLUMNS = True
-    except NotImplementedError:
-        HAS_GEOMETRY_COLUMNS = False
+try:
+    GeometryColumns = connection.ops.geometry_columns()
+    HAS_GEOMETRY_COLUMNS = True
+except NotImplementedError:
+    HAS_GEOMETRY_COLUMNS = False
 
 
-@skipUnlessDBFeature('gis_enabled')
 class OperationTestCase(TransactionTestCase):
     available_apps = ['gis_tests.gis_migrations']
 
@@ -65,12 +63,9 @@ class OperationTestCase(TransactionTestCase):
         self.current_state = self.apply_operations('gis', ProjectState(), operations)
 
     def assertGeometryColumnsCount(self, expected_count):
-        table_name = 'gis_neighborhood'
-        if connection.features.uppercases_column_names:
-            table_name = table_name.upper()
         self.assertEqual(
             GeometryColumns.objects.filter(**{
-                GeometryColumns.table_name_col(): table_name,
+                '%s__iexact' % GeometryColumns.table_name_col(): 'gis_neighborhood',
             }).count(),
             expected_count
         )
@@ -120,6 +115,13 @@ class OperationTests(OperationTestCase):
         # Test spatial indices when available
         if self.has_spatial_indexes:
             self.assertSpatialIndexExists('gis_neighborhood', 'path')
+
+    @skipUnless(HAS_GEOMETRY_COLUMNS, "Backend doesn't support GeometryColumns.")
+    def test_geom_col_name(self):
+        self.assertEqual(
+            GeometryColumns.geom_col_name(),
+            'column_name' if oracle else 'f_geometry_column',
+        )
 
     @skipUnlessDBFeature('supports_raster')
     def test_add_raster_field(self):

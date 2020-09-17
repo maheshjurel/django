@@ -11,18 +11,6 @@ from django.db import models
 temp_storage_dir = tempfile.mkdtemp()
 temp_storage = FileSystemStorage(temp_storage_dir)
 
-ARTICLE_STATUS = (
-    (1, 'Draft'),
-    (2, 'Pending'),
-    (3, 'Live'),
-)
-
-ARTICLE_STATUS_CHAR = (
-    ('d', 'Draft'),
-    ('p', 'Pending'),
-    ('l', 'Live'),
-)
-
 
 class Person(models.Model):
     name = models.CharField(max_length=100)
@@ -40,8 +28,17 @@ class Category(models.Model):
         return self.__str__()
 
 
+class WriterManager(models.Manager):
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return qs.filter(archived=False)
+
+
 class Writer(models.Model):
     name = models.CharField(max_length=50, help_text='Use both first and last names.')
+    archived = models.BooleanField(default=False, editable=False)
+
+    objects = WriterManager()
 
     class Meta:
         ordering = ('name',)
@@ -51,6 +48,11 @@ class Writer(models.Model):
 
 
 class Article(models.Model):
+    ARTICLE_STATUS = (
+        (1, 'Draft'),
+        (2, 'Pending'),
+        (3, 'Live'),
+    )
     headline = models.CharField(max_length=50)
     slug = models.SlugField()
     pub_date = models.DateField()
@@ -151,7 +153,7 @@ class CustomFF(models.Model):
 
 
 class FilePathModel(models.Model):
-    path = models.FilePathField(path=os.path.dirname(__file__), match=r".*\.py$", blank=True)
+    path = models.FilePathField(path=os.path.dirname(__file__), match='models.py', blank=True)
 
 
 try:
@@ -192,6 +194,17 @@ try:
 
         def __str__(self):
             return self.description
+
+    class NoExtensionImageFile(models.Model):
+        def upload_to(self, filename):
+            return 'tests/no_extension'
+
+        description = models.CharField(max_length=20)
+        image = models.ImageField(storage=temp_storage, upload_to=upload_to)
+
+        def __str__(self):
+            return self.description
+
 except ImportError:
     test_images = False
 
@@ -211,11 +224,11 @@ class Price(models.Model):
     price = models.DecimalField(max_digits=10, decimal_places=2)
     quantity = models.PositiveIntegerField()
 
-    def __str__(self):
-        return "%s for %s" % (self.quantity, self.price)
-
     class Meta:
         unique_together = (('price', 'quantity'),)
+
+    def __str__(self):
+        return "%s for %s" % (self.quantity, self.price)
 
 
 class Triple(models.Model):
@@ -228,6 +241,11 @@ class Triple(models.Model):
 
 
 class ArticleStatus(models.Model):
+    ARTICLE_STATUS_CHAR = (
+        ('d', 'Draft'),
+        ('p', 'Pending'),
+        ('l', 'Live'),
+    )
     status = models.CharField(max_length=2, choices=ARTICLE_STATUS_CHAR, blank=True, null=True)
 
 
@@ -383,6 +401,9 @@ def today_callable_q():
 class Character(models.Model):
     username = models.CharField(max_length=100)
     last_action = models.DateTimeField()
+
+    def __str__(self):
+        return self.username
 
 
 class StumpJoke(models.Model):

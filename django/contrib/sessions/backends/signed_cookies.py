@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.contrib.sessions.backends.base import SessionBase
 from django.core import signing
 
@@ -7,16 +6,16 @@ class SessionStore(SessionBase):
 
     def load(self):
         """
-        We load the data from the key itself instead of fetching from
-        some external data store. Opposite of _get_session_key(),
-        raises BadSignature if signature fails.
+        Load the data from the key itself instead of fetching from some
+        external data store. Opposite of _get_session_key(), raise BadSignature
+        if signature fails.
         """
         try:
             return signing.loads(
                 self.session_key,
                 serializer=self.serializer,
                 # This doesn't handle non-default expiry dates, see #19201
-                max_age=settings.SESSION_COOKIE_AGE,
+                max_age=self.get_session_cookie_age(),
                 salt='django.contrib.sessions.backends.signed_cookies',
             )
         except Exception:
@@ -71,9 +70,8 @@ class SessionStore(SessionBase):
         Instead of generating a random string, generate a secure url-safe
         base64-encoded string of data as our session key.
         """
-        session_cache = getattr(self, '_session_cache', {})
         return signing.dumps(
-            session_cache, compress=True,
+            self._session, compress=True,
             salt='django.contrib.sessions.backends.signed_cookies',
             serializer=self.serializer,
         )

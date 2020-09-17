@@ -1,7 +1,8 @@
 import pickle
 
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.forms import FileField, ValidationError
+from django.forms import FileField
 from django.test import SimpleTestCase
 
 
@@ -73,6 +74,10 @@ class FileFieldTest(SimpleTestCase):
         # A file was uploaded and there is initial data (file identity is not dealt
         # with here)
         self.assertTrue(f.has_changed('resume.txt', {'filename': 'resume.txt', 'content': 'My resume'}))
+
+    def test_disabled_has_changed(self):
+        f = FileField(disabled=True)
+        self.assertIs(f.has_changed('x', 'y'), False)
 
     def test_file_picklable(self):
         self.assertIsInstance(pickle.loads(pickle.dumps(FileField())), FileField)
